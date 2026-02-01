@@ -1513,20 +1513,26 @@ void setupCANbus() {
     
     // Filtro 0: PGN 0xFEE0 - Vehicle Electrical Power (principale per luci)
     filter.id = 0x18FEE000;      // Priority 6, PGN FEE0, any source
-    filter.mask = 0x00FFFF00;    // Maschera per PGN (ignora source address)
+    filter.mask = 0x03FFFF00;    // Maschera per PGN (ignora priority e source address)
     filter.flags.extended = 1;   // 29-bit extended identifier
     Can.setFilter(filter, 0);
     
     // Filtro 1: PGN 0xFEEC - Dash Display
     filter.id = 0x18FEEC00;
+    filter.mask = 0x03FFFF00;
+    filter.flags.extended = 1;
     Can.setFilter(filter, 1);
     
     // Filtro 2: PGN 0xFDBC - Cab Message 1
     filter.id = 0x18FDBC00;
+    filter.mask = 0x03FFFF00;
+    filter.flags.extended = 1;
     Can.setFilter(filter, 2);
     
     // Filtro 3: PGN 0xFEB1 - Vehicle Position (frecce)
     filter.id = 0x18FEB100;
+    filter.mask = 0x03FFFF00;
+    filter.flags.extended = 1;
     Can.setFilter(filter, 3);
     
     // Debug (opzionale)
@@ -1577,7 +1583,6 @@ void readJ1939Messages() {
             // Estrai informazioni J1939
             uint32_t pgn = getPGN(msg.id);
             uint8_t source_address = msg.id & 0xFF;
-            uint8_t priority = (msg.id >> 26) & 0x07;
             
             // Processa messaggi luci Iveco
             processIvecoLights(pgn, msg.buf, msg.len, source_address);
