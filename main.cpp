@@ -7,9 +7,8 @@ MASTER 5.20.00090
 //#include <Adafruit_GFX.h>
 //#include <Adafruit_SH110X.h>
 
-// Librerie per CANbus J1939
-#include <SPI.h>
-#include <mcp2515_can.h>
+// Libreria per CANbus J1939 con controller STM32 integrato
+#include <STM32_CAN.h>
 /*#define i2c_Address 0x3c // I2C address for the OLED
 #define SCREEN_WIDTH 128  // OLED display width
 #define SCREEN_HEIGHT 64  // OLED display height
@@ -124,8 +123,9 @@ unsigned long timerT_RESUME = 0;
 unsigned long timerSpinta = 0;
 
 // ========== CANbus J1939 - Definizioni ==========
-// Pin MCP2515
-#define SPI_CS_PIN    PA15
+// Pin CAN (hardware defined - non servono definizioni esplicite)
+// PB8 = CAN1_RX (pin alternativo)
+// PB9 = CAN1_TX (pin alternativo)
 
 // PGN J1939 per Iveco Daily
 #define PGN_VEHICLE_ELECTRICAL_POWER  0xFEE0  // 65280 - Stato luci principali
@@ -151,8 +151,8 @@ struct IvecoLightsStatus {
     unsigned long last_update; // Timestamp ultimo aggiornamento
 };
 
-// Variabili globali CANbus
-mcp2515_can CAN(SPI_CS_PIN);
+// Variabili globali CANbus - STM32 integrato con SN65HVD230
+STM32_CAN Can(CAN1, ALT);  // ALT per usare pin alternativi PB8/PB9
 IvecoLightsStatus iveco_lights;
 
 // Dichiarazione funzioni CANbus J1939
@@ -1499,22 +1499,44 @@ void blinkLed() {
  * Configura MCP2515 a 250 kbps con ID estesi 29-bit
  */
 void setupCANbus() {
-    // Inizializza la struttura luci
-    memset(&iveco_lights, 0, sizeof(IvecoLightsStatus));
+    // Inizializza CAN1 con pin alternativi (PB8/PB9)
+    Can.begin();
+    Can.setBaudRate(250000);  // 250 kbps standard J1939
+    
+    // Imposta filtri per i PGN Iveco Daily
+    CAN_filter_t filter;
+    
+    // Filtro 0: PGN 0xFEE0 - Vehicle Electrical Power (principale per luci)
+    filter.id = 0x18FEE000;
+    filter.mask = 0x00FFFF00;
+    filter.flags.extended = 1;
+    filter.flags.rtr = 0;
+    Can.setFilter(filter, 0);
+    
+    // Filtro 1: PGN 0xFEEC - Dash Display
+    filter.id = 0x18FEEC00;
+    filter.mask = 0x00FFFF00;
+    filter.flags.extended = 1;
+    Can.setFilter(filter, 1);
+    
+    // Filtro 2: PGN 0xFDBC - Cab Message
+    filter.id = 0x18FDBC00;
+    filter.mask = 0x00FFFF00;
+    filter.flags.extended = 1;
+    Can.setFilter(filter, 2);
+    
+    // Filtro 3: PGN 0xFEB1 - Vehicle Position (frecce)
+    filter.id = 0x18FEB100;
+    filter.mask = 0x00FFFF00;
+    filter.flags.extended = 1;
+    Can.setFilter(filter, 3);
+    
+    // Inizializza struttura dati luci
+    memset(&iveco_lights, 0, sizeof(iveco_lights));
     iveco_lights.last_update = 0;
     
-    // Inizializza SPI1 con i pin specificati (SCK: PB3, MISO: PA6, MOSI: PA7, CS: PA15)
-    CAN.init(SPI_CS_PIN);
-    
-    // Imposta velocità CAN a 250 kbps (standard J1939)
-    if (CAN.begin(CAN_250KBPS) == CAN_OK) {
-        // CAN inizializzato correttamente
-        // Modalità normale (non loopback, non silent)
-        CAN.setMode(MODE_NORMAL);
-    } else {
-        // Errore inizializzazione CAN - continua comunque
-        // Il sistema RS485 funzionerà normalmente
-    }
+    // Debug (opzionale)
+    // Serial.println("CANbus J1939 inizializzato su PB8/PB9 con SN65HVD230");
 }
 
 /**
@@ -1552,24 +1574,19 @@ uint32_t getPGN(uint32_t can_id) {
  * Chiama processIvecoLights per decodificarli
  */
 void readJ1939Messages() {
-    // Controlla se ci sono messaggi disponibili
-    if (CAN.checkReceive() == CAN_MSGAVAIL) {
-        uint32_t can_id;
-        uint8_t len;
-        uint8_t data[8];
-        
-        // Leggi il messaggio
-        CAN.readMsgBuf(&len, data);
-        can_id = CAN.getCanId();
-        
-        // Verifica che sia un frame esteso (29-bit)
-        if (CAN.isExtendedFrame()) {
-            // Estrai PGN e source address
-            uint32_t pgn = getPGN(can_id);
-            uint8_t source = can_id & 0xFF;
+    CAN_message_t msg;
+    
+    // Leggi messaggio se disponibile
+    if (Can.read(msg)) {
+        // Verifica che sia extended frame (29-bit J1939)
+        if (msg.flags.extended) {
+            // Estrai informazioni J1939
+            uint32_t pgn = getPGN(msg.id);
+            uint8_t source_address = msg.id & 0xFF;
+            uint8_t priority = (msg.id >> 26) & 0x07;
             
-            // Processa il messaggio
-            processIvecoLights(pgn, data, len, source);
+            // Processa i messaggi delle luci
+            processIvecoLights(pgn, msg.buf, msg.len, source_address);
         }
     }
 }
