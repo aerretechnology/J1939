@@ -7,7 +7,9 @@ MASTER 5.20.00090
 //#include <Adafruit_GFX.h>
 //#include <Adafruit_SH110X.h>
 
-//#include <SPI.h>
+// Librerie per CANbus J1939
+#include <SPI.h>
+#include <mcp2515_can.h>
 /*#define i2c_Address 0x3c // I2C address for the OLED
 #define SCREEN_WIDTH 128  // OLED display width
 #define SCREEN_HEIGHT 64  // OLED display height
@@ -121,6 +123,48 @@ unsigned long timerRESUME = 0;
 unsigned long timerT_RESUME = 0;
 unsigned long timerSpinta = 0;
 
+// ========== CANbus J1939 - Definizioni ==========
+// Pin MCP2515
+#define SPI_CS_PIN    PA15
+
+// PGN J1939 per Iveco Daily
+#define PGN_VEHICLE_ELECTRICAL_POWER  0xFEE0  // 65280 - Stato luci principali
+#define PGN_DASH_DISPLAY              0xFEEC  // 65276 - Display e segnalazioni
+#define PGN_CAB_MESSAGE_1             0xFDBC  // 64972 - Messaggi cabina
+#define PGN_LIGHTING_COMMAND          0xFEB5  // 65205 - Comandi luci
+#define PGN_VEHICLE_POSITION          0xFEB1  // 65201 - Include frecce
+
+// Struttura stato luci Iveco
+struct IvecoLightsStatus {
+    bool parking_lights;      // Luci di posizione
+    bool low_beam;            // Anabbaglianti
+    bool high_beam;           // Abbaglianti
+    bool front_fog_lights;    // Fendinebbia anteriori
+    bool rear_fog_lights;     // Fendinebbia posteriori
+    bool left_turn_signal;    // Freccia sinistra
+    bool right_turn_signal;   // Freccia destra
+    bool hazard_warning;      // Emergenza/4 frecce
+    bool brake_lights;        // Stop
+    bool reverse_lights;      // Retromarcia
+    bool work_lights;         // Luci da lavoro
+    bool beacon;              // Lampeggiante/strobo
+    unsigned long last_update; // Timestamp ultimo aggiornamento
+};
+
+// Variabili globali CANbus
+mcp2515_can CAN(SPI_CS_PIN);
+IvecoLightsStatus iveco_lights;
+
+// Dichiarazione funzioni CANbus J1939
+void setupCANbus();
+uint32_t getPGN(uint32_t can_id);
+void readJ1939Messages();
+void processIvecoLights(uint32_t pgn, uint8_t* data, uint8_t len, uint8_t source);
+bool isLightsDataValid();
+void printLightsStatus();
+void mapIvecoLightsToOutputs();
+// ================================================
+
 
 // Dichiarazione delle funzioni
 void blinkLed();
@@ -202,6 +246,10 @@ void setup() {
     }
 
     SystemClock_Config();
+    
+    // Inizializza CANbus J1939
+    setupCANbus();
+    
     //Serial.begin(115200);
     Serial1.begin(BAUD_RATE);
     pinMode(INT_Pin, OUTPUT);
@@ -582,6 +630,12 @@ void loop() {
     blinkLed();  
     handleInterrupt();
 
+    // Leggi messaggi J1939 dal bus CAN Iveco
+    readJ1939Messages();
+
+    // Mappa le luci Iveco ai tuoi output (opzionale)
+    mapIvecoLightsToOutputs();
+
     if (currentMillis - lastSend >= DELAY_BETWEEN_TRANSMISSION) {
             lastSend = currentMillis;
             switch (send) {
@@ -700,6 +754,15 @@ void loop() {
             slave3_ints[i] = 0;
         }
     }   
+
+    // Debug: stampa stato luci ogni 5 secondi (opzionale - decommentare Serial.begin per abilitare)
+    /*
+    static unsigned long lastPrint = 0;
+    if (millis() - lastPrint > 5000) {
+        printLightsStatus();
+        lastPrint = millis();
+    }
+    */
      
     switch(stato){
         case 0:
@@ -1428,3 +1491,237 @@ void blinkLed() {
     skip = 0;
   } 
 }
+
+// ========== Implementazione funzioni CANbus J1939 ==========
+
+/**
+ * Inizializza il bus CAN J1939
+ * Configura MCP2515 a 250 kbps con ID estesi 29-bit
+ */
+void setupCANbus() {
+    // Inizializza la struttura luci
+    memset(&iveco_lights, 0, sizeof(IvecoLightsStatus));
+    iveco_lights.last_update = 0;
+    
+    // Inizializza SPI1 con i pin specificati (SCK: PB3, MISO: PA6, MOSI: PA7, CS: PA15)
+    CAN.init(SPI_CS_PIN);
+    
+    // Imposta velocità CAN a 250 kbps (standard J1939)
+    if (CAN.begin(CAN_250KBPS) == CAN_OK) {
+        // CAN inizializzato correttamente
+        // Modalità normale (non loopback, non silent)
+        CAN.setMode(MODE_NORMAL);
+    } else {
+        // Errore inizializzazione CAN - continua comunque
+        // Il sistema RS485 funzionerà normalmente
+    }
+}
+
+/**
+ * Estrae il PGN da un CAN ID esteso 29-bit secondo lo standard J1939
+ * @param can_id CAN ID esteso 29-bit
+ * @return PGN estratto
+ */
+uint32_t getPGN(uint32_t can_id) {
+    // J1939 29-bit CAN ID structure:
+    // [28:26] Priority (3 bits)
+    // [25:24] Reserved (2 bits) 
+    // [23:16] PDU Format (8 bits)
+    // [15:8]  PDU Specific (8 bits) - può essere destination o group extension
+    // [7:0]   Source Address (8 bits)
+    
+    uint8_t pdu_format = (can_id >> 16) & 0xFF;
+    uint8_t pdu_specific = (can_id >> 8) & 0xFF;
+    
+    uint32_t pgn;
+    if (pdu_format < 240) {
+        // PDU1 format (destination specific)
+        // PGN = [Reserved][PDU Format][00]
+        pgn = ((can_id >> 8) & 0x03FF00);
+    } else {
+        // PDU2 format (broadcast)
+        // PGN = [Reserved][PDU Format][PDU Specific]
+        pgn = ((can_id >> 8) & 0x03FFFF);
+    }
+    
+    return pgn;
+}
+
+/**
+ * Legge messaggi J1939 dal bus CAN
+ * Chiama processIvecoLights per decodificarli
+ */
+void readJ1939Messages() {
+    // Controlla se ci sono messaggi disponibili
+    if (CAN.checkReceive() == CAN_MSGAVAIL) {
+        uint32_t can_id;
+        uint8_t len;
+        uint8_t data[8];
+        
+        // Leggi il messaggio
+        CAN.readMsgBuf(&len, data);
+        can_id = CAN.getCanId();
+        
+        // Verifica che sia un frame esteso (29-bit)
+        if (CAN.isExtendedFrame()) {
+            // Estrai PGN e source address
+            uint32_t pgn = getPGN(can_id);
+            uint8_t source = can_id & 0xFF;
+            
+            // Processa il messaggio
+            processIvecoLights(pgn, data, len, source);
+        }
+    }
+}
+
+/**
+ * Processa messaggi J1939 per estrarre lo stato delle luci Iveco
+ * @param pgn Parameter Group Number
+ * @param data Dati del messaggio (max 8 byte)
+ * @param len Lunghezza dati
+ * @param source Source address del mittente
+ */
+void processIvecoLights(uint32_t pgn, uint8_t* data, uint8_t len, uint8_t source) {
+    // Helper macro per estrarre valori da 2 bit
+    #define GET_2_BITS(byte, start_bit) (((byte) >> (start_bit)) & 0x03)
+    
+    switch (pgn) {
+        case PGN_VEHICLE_ELECTRICAL_POWER:  // 0xFEE0
+            if (len >= 4) {
+                // Byte 0, bit 2-3: Hazard warning
+                iveco_lights.hazard_warning = (GET_2_BITS(data[0], 2) == 0x01);
+                
+                // Byte 1, bit 0-1: Left turn signal
+                iveco_lights.left_turn_signal = (GET_2_BITS(data[1], 0) == 0x01);
+                
+                // Byte 1, bit 2-3: Right turn signal
+                iveco_lights.right_turn_signal = (GET_2_BITS(data[1], 2) == 0x01);
+                
+                // Byte 2, bit 0-1: Parking lights
+                iveco_lights.parking_lights = (GET_2_BITS(data[2], 0) == 0x01);
+                
+                // Byte 2, bit 2-3: Low beam
+                iveco_lights.low_beam = (GET_2_BITS(data[2], 2) == 0x01);
+                
+                // Byte 2, bit 4-5: High beam
+                iveco_lights.high_beam = (GET_2_BITS(data[2], 4) == 0x01);
+                
+                // Byte 2, bit 6-7: Front fog lights
+                iveco_lights.front_fog_lights = (GET_2_BITS(data[2], 6) == 0x01);
+                
+                // Byte 3, bit 0-1: Rear fog lights
+                iveco_lights.rear_fog_lights = (GET_2_BITS(data[3], 0) == 0x01);
+                
+                // Byte 3, bit 2-3: Brake lights
+                iveco_lights.brake_lights = (GET_2_BITS(data[3], 2) == 0x01);
+                
+                // Byte 3, bit 4-5: Reverse lights
+                iveco_lights.reverse_lights = (GET_2_BITS(data[3], 4) == 0x01);
+                
+                iveco_lights.last_update = millis();
+            }
+            break;
+            
+        case PGN_DASH_DISPLAY:  // 0xFEEC
+            if (len >= 6) {
+                // Byte 5, bit 4-5: High beam indicator (conferma)
+                bool high_beam_conf = (GET_2_BITS(data[5], 4) == 0x01);
+                if (high_beam_conf) {
+                    iveco_lights.high_beam = true;
+                }
+                iveco_lights.last_update = millis();
+            }
+            break;
+            
+        case PGN_CAB_MESSAGE_1:  // 0xFDBC
+            if (len >= 7) {
+                // Byte 6, bit 0-1: Work lights
+                iveco_lights.work_lights = (GET_2_BITS(data[6], 0) == 0x01);
+                iveco_lights.last_update = millis();
+            }
+            break;
+            
+        case PGN_VEHICLE_POSITION:  // 0xFEB1
+            if (len >= 1) {
+                // Byte 0, bit 0-1: Left turn signal (conferma)
+                iveco_lights.left_turn_signal = (GET_2_BITS(data[0], 0) == 0x01);
+                
+                // Byte 0, bit 2-3: Right turn signal (conferma)
+                iveco_lights.right_turn_signal = (GET_2_BITS(data[0], 2) == 0x01);
+                
+                iveco_lights.last_update = millis();
+            }
+            break;
+            
+        default:
+            // PGN non gestito - ignora
+            break;
+    }
+    
+    #undef GET_2_BITS
+}
+
+/**
+ * Verifica se i dati delle luci sono validi (ricevuti recentemente)
+ * @return true se i dati sono stati ricevuti negli ultimi 2000ms
+ */
+bool isLightsDataValid() {
+    if (iveco_lights.last_update == 0) {
+        return false;
+    }
+    return (millis() - iveco_lights.last_update) < 2000;
+}
+
+/**
+ * Stampa lo stato delle luci su Serial (per debug)
+ * Decommentare Serial.begin(115200) nel setup() per abilitare
+ */
+void printLightsStatus() {
+    if (!isLightsDataValid()) {
+        // Serial.println("J1939: Dati non validi (timeout)");
+        return;
+    }
+    
+    // Serial.println("=== Stato Luci Iveco J1939 ===");
+    // Serial.print("Luci posizione: "); Serial.println(iveco_lights.parking_lights ? "ON" : "OFF");
+    // Serial.print("Anabbaglianti: "); Serial.println(iveco_lights.low_beam ? "ON" : "OFF");
+    // Serial.print("Abbaglianti: "); Serial.println(iveco_lights.high_beam ? "ON" : "OFF");
+    // Serial.print("Fendinebbia ant.: "); Serial.println(iveco_lights.front_fog_lights ? "ON" : "OFF");
+    // Serial.print("Fendinebbia post.: "); Serial.println(iveco_lights.rear_fog_lights ? "ON" : "OFF");
+    // Serial.print("Freccia SX: "); Serial.println(iveco_lights.left_turn_signal ? "ON" : "OFF");
+    // Serial.print("Freccia DX: "); Serial.println(iveco_lights.right_turn_signal ? "ON" : "OFF");
+    // Serial.print("Emergenza: "); Serial.println(iveco_lights.hazard_warning ? "ON" : "OFF");
+    // Serial.print("Stop: "); Serial.println(iveco_lights.brake_lights ? "ON" : "OFF");
+    // Serial.print("Retromarcia: "); Serial.println(iveco_lights.reverse_lights ? "ON" : "OFF");
+    // Serial.print("Luci lavoro: "); Serial.println(iveco_lights.work_lights ? "ON" : "OFF");
+    // Serial.println("==============================");
+}
+
+/**
+ * Mappa lo stato delle luci Iveco agli output master_bits
+ * Solo se i dati CAN sono validi (ricevuti negli ultimi 2 secondi)
+ */
+void mapIvecoLightsToOutputs() {
+    if (!isLightsDataValid()) {
+        // Dati non validi - non modificare gli output
+        return;
+    }
+    
+    // Mappa le luci Iveco ai bit del master
+    // Nota: master_bits[30-34] sono disponibili (non usati dal codice esistente)
+    master_bits[30] = iveco_lights.parking_lights;
+    master_bits[31] = iveco_lights.low_beam;
+    master_bits[32] = iveco_lights.high_beam;
+    master_bits[33] = iveco_lights.left_turn_signal;
+    master_bits[34] = iveco_lights.right_turn_signal;
+    
+    // Altri bit potrebbero essere mappati se necessario:
+    // master_bits[xx] = iveco_lights.front_fog_lights;
+    // master_bits[xx] = iveco_lights.rear_fog_lights;
+    // master_bits[xx] = iveco_lights.hazard_warning;
+    // master_bits[xx] = iveco_lights.brake_lights;
+    // master_bits[xx] = iveco_lights.reverse_lights;
+    // master_bits[xx] = iveco_lights.work_lights;
+}
+
+// ========== Fine implementazione CANbus J1939 ==========
