@@ -1500,39 +1500,47 @@ void blinkLed() {
  */
 void setupCANbus() {
     // Inizializza CAN1 con pin alternativi (PB8/PB9)
-    Can.begin();
-    Can.setBaudRate(250000);  // 250 kbps standard J1939
+    if (!Can.begin()) {
+        // Errore inizializzazione CAN - continua comunque
+        // Il sistema RS485 funzionerà normalmente
+        return;
+    }
+    
+    if (!Can.setBaudRate(250000)) {  // 250 kbps standard J1939
+        // Errore impostazione baudrate - continua comunque
+        return;
+    }
     
     // Imposta filtri per i PGN Iveco Daily
     CAN_filter_t filter;
     
     // Filtro 0: PGN 0xFEE0 - Vehicle Electrical Power (principale per luci)
     filter.id = 0x18FEE000;
-    filter.mask = 0x00FFFF00;
+    filter.mask = 0x1FFFF00;  // Maschera PGN (bit 8-24) + permetti qualsiasi source address
     filter.flags.extended = 1;
     filter.flags.rtr = 0;
     Can.setFilter(filter, 0);
     
     // Filtro 1: PGN 0xFEEC - Dash Display
     filter.id = 0x18FEEC00;
-    filter.mask = 0x00FFFF00;
+    filter.mask = 0x1FFFF00;
     filter.flags.extended = 1;
     Can.setFilter(filter, 1);
     
     // Filtro 2: PGN 0xFDBC - Cab Message
     filter.id = 0x18FDBC00;
-    filter.mask = 0x00FFFF00;
+    filter.mask = 0x1FFFF00;
     filter.flags.extended = 1;
     Can.setFilter(filter, 2);
     
     // Filtro 3: PGN 0xFEB1 - Vehicle Position (frecce)
     filter.id = 0x18FEB100;
-    filter.mask = 0x00FFFF00;
+    filter.mask = 0x1FFFF00;
     filter.flags.extended = 1;
     Can.setFilter(filter, 3);
     
     // Inizializza struttura dati luci
-    memset(&iveco_lights, 0, sizeof(iveco_lights));
+    memset(&iveco_lights, 0, sizeof(IvecoLightsStatus));
     iveco_lights.last_update = 0;
     
     // Debug (opzionale)
