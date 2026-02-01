@@ -1582,43 +1582,41 @@ void readJ1939Messages() {
  * @param source Source address del mittente
  */
 void processIvecoLights(uint32_t pgn, uint8_t* data, uint8_t len, uint8_t source) {
-    // Helper per estrarre valori da 2 bit
-    auto getBits = [](uint8_t byte, uint8_t start_bit) -> uint8_t {
-        return (byte >> start_bit) & 0x03;
-    };
+    // Helper macro per estrarre valori da 2 bit
+    #define GET_2_BITS(byte, start_bit) (((byte) >> (start_bit)) & 0x03)
     
     switch (pgn) {
         case PGN_VEHICLE_ELECTRICAL_POWER:  // 0xFEE0
             if (len >= 4) {
                 // Byte 0, bit 2-3: Hazard warning
-                iveco_lights.hazard_warning = (getBits(data[0], 2) == 0x01);
+                iveco_lights.hazard_warning = (GET_2_BITS(data[0], 2) == 0x01);
                 
                 // Byte 1, bit 0-1: Left turn signal
-                iveco_lights.left_turn_signal = (getBits(data[1], 0) == 0x01);
+                iveco_lights.left_turn_signal = (GET_2_BITS(data[1], 0) == 0x01);
                 
                 // Byte 1, bit 2-3: Right turn signal
-                iveco_lights.right_turn_signal = (getBits(data[1], 2) == 0x01);
+                iveco_lights.right_turn_signal = (GET_2_BITS(data[1], 2) == 0x01);
                 
                 // Byte 2, bit 0-1: Parking lights
-                iveco_lights.parking_lights = (getBits(data[2], 0) == 0x01);
+                iveco_lights.parking_lights = (GET_2_BITS(data[2], 0) == 0x01);
                 
                 // Byte 2, bit 2-3: Low beam
-                iveco_lights.low_beam = (getBits(data[2], 2) == 0x01);
+                iveco_lights.low_beam = (GET_2_BITS(data[2], 2) == 0x01);
                 
                 // Byte 2, bit 4-5: High beam
-                iveco_lights.high_beam = (getBits(data[2], 4) == 0x01);
+                iveco_lights.high_beam = (GET_2_BITS(data[2], 4) == 0x01);
                 
                 // Byte 2, bit 6-7: Front fog lights
-                iveco_lights.front_fog_lights = (getBits(data[2], 6) == 0x01);
+                iveco_lights.front_fog_lights = (GET_2_BITS(data[2], 6) == 0x01);
                 
                 // Byte 3, bit 0-1: Rear fog lights
-                iveco_lights.rear_fog_lights = (getBits(data[3], 0) == 0x01);
+                iveco_lights.rear_fog_lights = (GET_2_BITS(data[3], 0) == 0x01);
                 
                 // Byte 3, bit 2-3: Brake lights
-                iveco_lights.brake_lights = (getBits(data[3], 2) == 0x01);
+                iveco_lights.brake_lights = (GET_2_BITS(data[3], 2) == 0x01);
                 
                 // Byte 3, bit 4-5: Reverse lights
-                iveco_lights.reverse_lights = (getBits(data[3], 4) == 0x01);
+                iveco_lights.reverse_lights = (GET_2_BITS(data[3], 4) == 0x01);
                 
                 iveco_lights.last_update = millis();
             }
@@ -1627,7 +1625,7 @@ void processIvecoLights(uint32_t pgn, uint8_t* data, uint8_t len, uint8_t source
         case PGN_DASH_DISPLAY:  // 0xFEEC
             if (len >= 6) {
                 // Byte 5, bit 4-5: High beam indicator (conferma)
-                bool high_beam_conf = (getBits(data[5], 4) == 0x01);
+                bool high_beam_conf = (GET_2_BITS(data[5], 4) == 0x01);
                 if (high_beam_conf) {
                     iveco_lights.high_beam = true;
                 }
@@ -1638,7 +1636,7 @@ void processIvecoLights(uint32_t pgn, uint8_t* data, uint8_t len, uint8_t source
         case PGN_CAB_MESSAGE_1:  // 0xFDBC
             if (len >= 7) {
                 // Byte 6, bit 0-1: Work lights
-                iveco_lights.work_lights = (getBits(data[6], 0) == 0x01);
+                iveco_lights.work_lights = (GET_2_BITS(data[6], 0) == 0x01);
                 iveco_lights.last_update = millis();
             }
             break;
@@ -1646,10 +1644,10 @@ void processIvecoLights(uint32_t pgn, uint8_t* data, uint8_t len, uint8_t source
         case PGN_VEHICLE_POSITION:  // 0xFEB1
             if (len >= 1) {
                 // Byte 0, bit 0-1: Left turn signal (conferma)
-                iveco_lights.left_turn_signal = (getBits(data[0], 0) == 0x01);
+                iveco_lights.left_turn_signal = (GET_2_BITS(data[0], 0) == 0x01);
                 
                 // Byte 0, bit 2-3: Right turn signal (conferma)
-                iveco_lights.right_turn_signal = (getBits(data[0], 2) == 0x01);
+                iveco_lights.right_turn_signal = (GET_2_BITS(data[0], 2) == 0x01);
                 
                 iveco_lights.last_update = millis();
             }
@@ -1659,6 +1657,8 @@ void processIvecoLights(uint32_t pgn, uint8_t* data, uint8_t len, uint8_t source
             // PGN non gestito - ignora
             break;
     }
+    
+    #undef GET_2_BITS
 }
 
 /**
