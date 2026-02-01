@@ -1583,7 +1583,6 @@ void readJ1939Messages() {
             // Estrai informazioni J1939
             uint32_t pgn = getPGN(msg.id);
             uint8_t source_address = msg.id & 0xFF;
-            uint8_t priority = (msg.id >> 26) & 0x07;
             
             // Processa i messaggi delle luci
             processIvecoLights(pgn, msg.buf, msg.len, source_address);
