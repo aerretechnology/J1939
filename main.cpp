@@ -7,7 +7,7 @@ MASTER 5.20.00090
 //#include <Adafruit_GFX.h>
 //#include <Adafruit_SH110X.h>
 
-// Libreria per CANbus J1939 con controller bxCAN integrato STM32
+// Libreria per CANbus J1939 con controller STM32 integrato
 #include <STM32_CAN.h>
 /*#define i2c_Address 0x3c // I2C address for the OLED
 #define SCREEN_WIDTH 128  // OLED display width
@@ -123,9 +123,9 @@ unsigned long timerT_RESUME = 0;
 unsigned long timerSpinta = 0;
 
 // ========== CANbus J1939 - Definizioni ==========
-// Pin CAN (alternativi PB8/PB9, PA11/PA12 riservati per USB/DFU)
-#define CAN_RX_PIN PB8
-#define CAN_TX_PIN PB9
+// Pin CAN (hardware defined - non servono definizioni esplicite)
+// PB8 = CAN1_RX (pin alternativo)
+// PB9 = CAN1_TX (pin alternativo)
 
 // PGN J1939 per Iveco Daily
 #define PGN_VEHICLE_ELECTRICAL_POWER  0xFEE0  // 65280 - Stato luci principali
@@ -151,9 +151,8 @@ struct IvecoLightsStatus {
     unsigned long last_update; // Timestamp ultimo aggiornamento
 };
 
-// Variabili globali CANbus
-// Usa CAN1 con pin alternativi (ALT = PB8/PB9)
-STM32_CAN Can(CAN1, ALT);
+// Variabili globali CANbus - STM32 integrato con SN65HVD230
+STM32_CAN Can(CAN1, ALT);  // ALT per usare pin alternativi PB8/PB9
 IvecoLightsStatus iveco_lights;
 
 // Dichiarazione funzioni CANbus J1939
@@ -1496,47 +1495,56 @@ void blinkLed() {
 // ========== Implementazione funzioni CANbus J1939 ==========
 
 /**
- * Inizializza il bus CAN J1939 con controller bxCAN integrato STM32
- * Configura velocità 250 kbps e filtri hardware per PGN Iveco
+ * Inizializza il bus CAN J1939
+ * Configura MCP2515 a 250 kbps con ID estesi 29-bit
  */
 void setupCANbus() {
-    // Inizializza la struttura luci
-    memset(&iveco_lights, 0, sizeof(IvecoLightsStatus));
-    iveco_lights.last_update = 0;
+    // Inizializza CAN1 con pin alternativi (PB8/PB9)
+    if (!Can.begin()) {
+        // Errore inizializzazione CAN - continua comunque
+        // Il sistema RS485 funzionerà normalmente
+        return;
+    }
     
-    // Inizializza controller CAN integrato STM32 (bxCAN)
-    Can.begin();
-    Can.setBaudRate(250000);  // J1939 standard: 250 kbps
+    if (!Can.setBaudRate(250000)) {  // 250 kbps standard J1939
+        // Errore impostazione baudrate - continua comunque
+        return;
+    }
     
-    // Configura filtri hardware per ricevere solo i PGN rilevanti Iveco
+    // Imposta filtri per i PGN Iveco Daily
     CAN_filter_t filter;
     
     // Filtro 0: PGN 0xFEE0 - Vehicle Electrical Power (principale per luci)
-    filter.id = 0x18FEE000;      // Priority 6, PGN FEE0, any source
-    filter.mask = 0x03FFFF00;    // Maschera per PGN (ignora priority e source address)
-    filter.flags.extended = 1;   // 29-bit extended identifier
+    filter.id = 0x18FEE000;
+    filter.mask = 0x00FFFF00;  // Maschera PGN (bit 8-23), ignora priority e source address
+    filter.flags.extended = 1;
+    filter.flags.rtr = 0;
     Can.setFilter(filter, 0);
     
     // Filtro 1: PGN 0xFEEC - Dash Display
     filter.id = 0x18FEEC00;
-    filter.mask = 0x03FFFF00;
+    filter.mask = 0x00FFFF00;
     filter.flags.extended = 1;
     Can.setFilter(filter, 1);
     
-    // Filtro 2: PGN 0xFDBC - Cab Message 1
+    // Filtro 2: PGN 0xFDBC - Cab Message
     filter.id = 0x18FDBC00;
-    filter.mask = 0x03FFFF00;
+    filter.mask = 0x00FFFF00;
     filter.flags.extended = 1;
     Can.setFilter(filter, 2);
     
     // Filtro 3: PGN 0xFEB1 - Vehicle Position (frecce)
     filter.id = 0x18FEB100;
-    filter.mask = 0x03FFFF00;
+    filter.mask = 0x00FFFF00;
     filter.flags.extended = 1;
     Can.setFilter(filter, 3);
     
+    // Inizializza struttura dati luci
+    memset(&iveco_lights, 0, sizeof(IvecoLightsStatus));
+    iveco_lights.last_update = 0;
+    
     // Debug (opzionale)
-    // Serial.println("CANbus J1939 inizializzato: SN65HVD230 su PB8/PB9");
+    // Serial.println("CANbus J1939 inizializzato su PB8/PB9 con SN65HVD230");
 }
 
 /**
@@ -1570,13 +1578,13 @@ uint32_t getPGN(uint32_t can_id) {
 }
 
 /**
- * Legge messaggi J1939 dal controller CAN integrato
+ * Legge messaggi J1939 dal bus CAN
  * Chiama processIvecoLights per decodificarli
  */
 void readJ1939Messages() {
     CAN_message_t msg;
     
-    // Controlla se ci sono messaggi disponibili
+    // Leggi messaggio se disponibile
     if (Can.read(msg)) {
         // Verifica che sia extended frame (29-bit J1939)
         if (msg.flags.extended) {
@@ -1584,7 +1592,7 @@ void readJ1939Messages() {
             uint32_t pgn = getPGN(msg.id);
             uint8_t source_address = msg.id & 0xFF;
             
-            // Processa messaggi luci Iveco
+            // Processa i messaggi delle luci
             processIvecoLights(pgn, msg.buf, msg.len, source_address);
         }
     }
